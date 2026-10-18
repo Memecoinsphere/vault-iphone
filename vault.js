@@ -80,6 +80,27 @@ export class Vault {
     this.cfg.prf = { credentialId, prfSalt, hkdfSalt, wrap: await C.wrapDataKey(this.key, kek, C.AAD_PRF) };
     await this.save();
   }
+  // Échecs Face ID : comptés dans le MÊME compteur d'échecs consécutifs que les codes erronés,
+  // dès que l'effacement après N échecs est activé. WebAuthn ne distingue pas « visage non reconnu »
+  // et « annulé » (NotAllowedError) : toute tentative biométrique non aboutie compte.
+  // L'essai est compté AVANT d'ouvrir l'invite (tuer l'app pendant l'invite ne l'annule pas) ;
+  // un déverrouillage réussi (code ou Face ID) remet le compteur à zéro.
+  biometricCounts() { return !!this.cfg?.settings.wipeAfter; }
+  async beginBiometricAttempt() {
+    await this.load();
+    if (!this.cfg?.prf) throw new VaultError('NO_PRF');
+    if (!this.biometricCounts()) return;
+    const st = this.lockStatus();
+    if (st.waitMs > 0) throw new VaultError('RATE_LIMIT', { waitMs: st.waitMs });
+    const a = this.cfg.attempts;
+    a.failed += 1; a.lockUntil = now() + lockDelayMs(a.failed); await this.save();
+  }
+  async biometricFailed() {
+    if (!this.biometricCounts()) return { counted: false };
+    const a = this.cfg.attempts, wipeAfter = this.cfg.settings.wipeAfter;
+    if (a.failed >= wipeAfter) { await this.wipe(); throw new VaultError('WIPED'); }
+    return { counted: true, failed: a.failed, remaining: wipeAfter - a.failed, waitMs: Math.max(0, a.lockUntil - now()) };
+  }
   async disablePrf() { this.cfg.prf = null; await this.save(); }
   async unlockWithPrf(prfOutput) {
     await this.load();

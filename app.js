@@ -145,15 +145,11 @@ function showLock(message = '') {
     b.innerHTML = `${ICON.face} ${bioLabel}`; b.setAttribute('aria-label', `Déverrouiller avec ${bioLabel}`);
     b.onclick = async () => {
       ui.msg.className = 'msg'; ui.msg.textContent = '';
-      try {
-        const out = await WA.evaluatePrf(vault.cfg.prf.credentialId, vault.cfg.prf.prfSalt);
-        await vault.unlockWithPrf(out); await enterMain();
-      } catch (e) {
-        ui.msg.className = 'msg err';
-        ui.msg.textContent = e.code === 'BAD_PRF' ? 'Clé biométrique invalide. Utilisez le code.' : (e.name === 'NotAllowedError' ? 'Authentification annulée.' : 'Biométrie indisponible. Utilisez le code.');
-      }
+      try { await biometricUnlock(); await enterMain(); }
+      catch (e) { if (e.code === 'WIPED') { wiped(); return; } bioError(e, ui.msg, pad); }
     };
     ui.alt.append(b);
+    if (vault.cfg.settings.wipeAfter) ui.alt.insertAdjacentHTML('beforeend', `<p class="sub small-warn">Effacement après ${vault.cfg.settings.wipeAfter} échecs actif : annuler Face ID compte aussi comme un échec.</p>`);
   }
   rateLimitUI(ui.msg, pad);
 }
@@ -171,12 +167,37 @@ function rateLimitUI(msgEl, pad) {
 
 function handlePinError(e, msgEl, pad) {
   msgEl.className = 'msg err';
-  if (e.code === 'WIPED') { clearInterval(rlTimer); alert('Trop d\'échecs : le coffre a été effacé conformément à vos réglages.'); location.reload(); return; }
+  if (e.code === 'WIPED') { wiped(); return; }
   if (e.code === 'BAD_PIN') {
     msgEl.textContent = 'Code incorrect.' + (e.remaining != null ? ` ${e.remaining} essai(s) avant effacement.` : '');
     if (e.waitMs > 0) rateLimitUI(msgEl, pad);
   } else if (e.code === 'RATE_LIMIT') rateLimitUI(msgEl, pad);
   else msgEl.textContent = 'Erreur : ' + (e.message || e);
+}
+
+// Déverrouillage Face ID : uniquement sur appui du bouton (jamais lancé automatiquement).
+async function biometricUnlock() {
+  await vault.beginBiometricAttempt(); // compte l'essai avant l'invite si l'effacement est activé
+  let out;
+  try { out = await WA.evaluatePrf(vault.cfg.prf.credentialId, vault.cfg.prf.prfSalt); }
+  catch (e) { const r = await vault.biometricFailed(); throw Object.assign(e, { bio: r }); }
+  try { await vault.unlockWithPrf(out); }
+  catch (e) { const r = await vault.biometricFailed(); throw Object.assign(e, { bio: r }); }
+}
+function bioError(e, msgEl, pad) {
+  msgEl.className = 'msg err';
+  if (e.code === 'RATE_LIMIT') { rateLimitUI(msgEl, pad); return; }
+  const base = e.code === 'BAD_PRF' ? 'Clé biométrique invalide.' : e.name === 'NotAllowedError' ? 'Face ID non reconnu ou annulé.' : 'Biométrie indisponible.';
+  const r = e.bio;
+  msgEl.textContent = base + (r?.counted ? ` Compté comme un échec : ${r.remaining} essai(s) avant effacement.` : ' Utilisez le code.');
+  if (r?.waitMs > 0) rateLimitUI(msgEl, pad);
+}
+
+// Effacement immédiat (sans dialogue ni délai) : retour direct à l'écran de création.
+function wiped() {
+  clearInterval(rlTimer); clearTimers(); revokeAll(); closeAllSheets(); S.items = [];
+  showSetup();
+  const m = $('.msg', app); if (m) { m.className = 'msg err'; m.textContent = "Trop d'échecs consécutifs (code ou Face ID) : le coffre a été effacé."; }
 }
 
 function lockNow(msg) {
@@ -230,7 +251,7 @@ function reauth(reason) {
       onSubmit: async (pin, p) => {
         msg.className = 'msg'; msg.innerHTML = '<span class="spinner"></span>';
         try { await vault.checkPin(pin); sh.close(); S.pad = prev; resolve(true); }
-        catch (e) { p.reset(true); if (e.code === 'WIPED') { alert('Trop d\'échecs : le coffre a été effacé.'); location.reload(); return; } handlePinError(e, msg, pad); }
+        catch (e) { p.reset(true); if (e.code === 'WIPED') { wiped(); return; } handlePinError(e, msg, pad); }
       }
     });
     $('.padslot', body).append(pad.el);
@@ -238,8 +259,9 @@ function reauth(reason) {
     if (vault.cfg.prf) {
       const b = document.createElement('button'); b.className = 'btn-ghost'; b.innerHTML = `${ICON.face} Utiliser ${bioLabel}`;
       b.onclick = async () => {
-        try { suspendBgLock(60000); const out = await WA.evaluatePrf(vault.cfg.prf.credentialId, vault.cfg.prf.prfSalt); await vault.unlockWithPrf(out); resumeBgLock(); sh.close(); S.pad = prev; resolve(true); }
-        catch { resumeBgLock(); msg.className = 'msg err'; msg.textContent = 'Échec biométrique. Utilisez le code.'; }
+        msg.className = 'msg'; msg.textContent = '';
+        try { suspendBgLock(60000); await biometricUnlock(); resumeBgLock(); sh.close(); S.pad = prev; resolve(true); }
+        catch (e) { resumeBgLock(); if (e.code === 'WIPED') { wiped(); resolve(false); return; } bioError(e, msg, pad); }
       };
       $('.alt', body).append(b);
     }
@@ -532,7 +554,7 @@ async function renderSettings() {
         <span class="switch"><input type="checkbox" id="bio" ${vault.cfg.prf ? 'checked' : ''} ${S.bio || vault.cfg.prf ? '' : 'disabled'}><span></span></span></label>
       <button class="set" id="chpin"><span class="lb">Changer le code</span><span class="chev">›</span></button>
       <div class="set"><span class="lb">Verrouillage automatique<small>Et immédiatement en arrière-plan</small></span><select id="al">${opt([[0.5, '30 s'], [1, '1 min'], [2, '2 min'], [5, '5 min'], [10, '10 min']], st.autoLockMin)}</select></div>
-      <div class="set"><span class="lb">Effacer après échecs<small>Efface tout après N codes erronés</small></span><select id="wa">${opt([[0, 'Désactivé'], [5, '5 essais'], [10, '10 essais'], [20, '20 essais']], st.wipeAfter)}</select></div>
+      <div class="set"><span class="lb">Effacer après échecs<small>Efface tout après N échecs consécutifs : code erroné ou Face ID non abouti. Attention : annuler Face ID compte aussi comme un échec.</small></span><select id="wa">${opt([[0, 'Désactivé'], [2, '2 essais'], [5, '5 essais'], [10, '10 essais'], [20, '20 essais']], st.wipeAfter)}</select></div>
       <div class="set"><span class="lb">Effacer le presse-papiers</span><select id="cb">${opt([[15, '15 s'], [30, '30 s'], [60, '60 s'], [120, '2 min']], st.clipboardSec ?? 30)}</select></div>
     </div>
     <div class="section-t">Sauvegarde</div><div class="list">
@@ -552,7 +574,7 @@ async function renderSettings() {
   $('#cb').onchange = (e) => vault.setSettings({ clipboardSec: +e.target.value });
   $('#wa').onchange = async (e) => {
     const v = +e.target.value;
-    if (v && !confirm(`Après ${v} codes erronés consécutifs, TOUT le coffre sera effacé définitivement. Activer ?`)) { e.target.value = st.wipeAfter; return; }
+    if (v && !confirm(`Après ${v} échecs consécutifs, TOUT le coffre sera effacé immédiatement et définitivement, sans délai ni confirmation.\n\nUn échec = un code erroné OU une tentative Face ID qui n'aboutit pas. Attention : annuler Face ID (ou fermer l'invite) compte aussi comme un échec.${v === 2 ? '\n\nMode 2 essais : un code faux puis un Face ID annulé suffisent à tout effacer.' : ''}\n\nActiver ?`)) { e.target.value = st.wipeAfter; return; }
     await vault.setSettings({ wipeAfter: v }); toast(v ? 'Effacement automatique activé.' : 'Effacement automatique désactivé.');
   };
   $('#bio').onchange = async (e) => {
