@@ -1,6 +1,6 @@
 // Service worker : met en cache l'application pour un fonctionnement 100 % hors ligne.
 // Il ne contacte que l'origine de l'app (aucun tiers) et ne voit jamais de données déchiffrées.
-const VERSION = 'coffre-fort-v1.0.0';
+const VERSION = 'coffre-fort-v1.1.0';
 const ASSETS = ['./', 'index.html', 'app.css', 'app.js', 'crypto.js', 'vault.js', 'db.js', 'webauthn.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/icon-maskable-512.png', 'icons/apple-touch-icon.png', 'icons/logo.png',
   'vendor/pdfjs/pdf.min.mjs', 'vendor/pdfjs/pdf.worker.min.mjs'];
